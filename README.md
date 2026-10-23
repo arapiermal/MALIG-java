@@ -62,8 +62,52 @@ A **JavaFX desktop application** provides interfaces for:
 - Submitting goals and observing execution.
 - Configuring LLM providers and runtime options.
 
-## Demonstration Scenario
 
+## Demonstrations
+
+The following screenshots illustrate HMAS's graphical interface and experimental scenarios, including agent configuration, deterministic execution, LLM integration, communication, and coordination.
+
+### 1. Agent Configuration
+
+The JavaFX interface allows users to configure agents, their behavior, connections, tools, memory, and runtime settings.
+
+![Agent Configuration](img/agentEditPanel.png)
+
+### 2. Deterministic Multi-Agent Resource Management
+
+A demonstration scenario where agents monitor resources, coordinate decisions, and execute resource-management operations through deterministic policies and registered capabilities.
+
+![Deterministic Resource Management](img/demoDETfood.png)
+
+### 3. Agent Cooperation and Peer Requests
+
+Agents can request assistance from other agents, exchange results, and coordinate execution through the shared runtime.
+
+![Peer Cooperation](img/peerReviewTest1.png)
+
+Execution events and diagnostics provide visibility into agent interactions and task outcomes.
+
+![Peer Execution Logs](img/peerReviewTest1Log.png)
+
+### 4. LLM Integration and Tool Calling
+
+HMAS supports external language model providers and tool/function calling, allowing LLM-powered agents to interact with the environment through registered capabilities.
+
+**Gemini — Tool Execution Loop**
+
+![Gemini Tool Loop](img/testToolLoopHMASgemini.png)
+
+**Groq — LLM Integration Test**
+
+![Groq LLM Test](img/testLLMgroq.png)
+
+### 5. Multi-Agent Conversations
+
+An experimental scenario demonstrating communication between simulated agents using natural-language interactions.
+
+![Multi-Agent Conversation](img/conversationPoliticiansRandom.png)
+
+These demonstrations illustrate individual framework capabilities and experimental workflows. They are not intended to represent a complete production-ready multi-agent system.
 
 
 ## Technologies
