@@ -18,7 +18,7 @@ public class AppMain extends Application {
         MainController controller = new MainController(stage, runtimeFacade, llmTestFacade);
         controller.wire(layoutBuilder.consolePane(), layoutBuilder.agentSidebarPane(), layoutBuilder.toolbarPane());
 
-        stage.setTitle("Hybrid Multi-Agent System — Regional Coordination");
+        stage.setTitle("Hybrid Multi-Agent System MALIG");
         stage.setScene(new Scene(root, 1200, 800));
         stage.setOnCloseRequest(event -> runtimeFacade.close());
         stage.show();
