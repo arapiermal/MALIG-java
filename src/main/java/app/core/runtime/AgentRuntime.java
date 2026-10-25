@@ -14,6 +14,7 @@ public final class AgentRuntime {
     private final Map<UUID, UUID> parents = new LinkedHashMap<>();
     private final Map<UUID, Delegation> delegations = new LinkedHashMap<>();
     private final Map<UUID, AgentRequest> requests = new LinkedHashMap<>();
+    private final Map<UUID, UserTask> userTasks = new LinkedHashMap<>();
     private final Map<UUID, ConversationSession> conversations = new LinkedHashMap<>();
     private final Map<UUID, CollaborationTask> collaborations = new LinkedHashMap<>();
     private final Map<String, java.util.function.Function<Map<String, Object>, Optional<String>>> resultContracts = new LinkedHashMap<>();
@@ -42,6 +43,7 @@ public final class AgentRuntime {
         this.environment = Objects.requireNonNull(environment);
         this.messageBus = Objects.requireNonNull(messageBus);
         this.trace = Objects.requireNonNull(trace);
+        trace.subscribe(this::observeUserTask);
         trace.subscribe(event -> {
             if (event.agentId() != null && Set.of(ExecutionEventType.ACTION_COMPLETED, ExecutionEventType.TASK_DELEGATED,
                     ExecutionEventType.TASK_COMPLETED, ExecutionEventType.REQUEST_SENT, ExecutionEventType.REQUEST_COMPLETED,
@@ -84,6 +86,8 @@ public final class AgentRuntime {
             synchronized (this) {
                 AbstractAgent removed = agents.remove(id);
                 if (removed == null) return Optional.empty();
+                for (UserTask task : List.copyOf(userTasks.values())) if (task.agentId().equals(id) && !task.terminal())
+                    removed.cancelGoal(task.id());
                 parents.remove(id);
                 parents.entrySet().removeIf(e -> e.getValue().equals(id));
                 messageBus.remove(id);
@@ -211,6 +215,46 @@ public final class AgentRuntime {
         trace.publish(new ExecutionEvent(null, ExecutionEventType.GOAL_SUBMITTED, id, "runtime",
                 goal.description(), Map.of("goalId", goal.id())));
     }
+    /** Explicit host submission using the canonical goal queue; unrelated agent/session work is not user history. */
+    public UUID submitUserTask(UUID agentId, Goal goal) {
+        synchronized (executionLock) {
+            synchronized (this) {
+                AbstractAgent agent = requireAgent(agentId);
+                if (userTasks.containsKey(goal.id())) throw new IllegalArgumentException("User goal ID already submitted");
+                userTasks.put(goal.id(), new UserTask(agentId, agent.name(), goal, UserTask.Status.PENDING, java.time.Instant.now(),
+                        null, null, "", Map.of(), app.llm.LLMStatus.configured(null)));
+                submitGoal(agentId, goal); return goal.id();
+            }
+        }
+    }
+    public synchronized List<UserTask> userTasks() { return List.copyOf(userTasks.values()); }
+    public synchronized UserTask userTask(UUID id) {
+        return Optional.ofNullable(userTasks.get(id)).orElseThrow(() -> new IllegalArgumentException("Unknown user task"));
+    }
+    /** Pending work only. In-flight calls/effects are not interrupted or rolled back. */
+    public boolean cancelUserTask(UUID id) {
+        synchronized (executionLock) {
+            synchronized (this) {
+                var task = userTask(id);
+                if (task.status() != UserTask.Status.PENDING) return false;
+                requireAgent(task.agentId()).cancelGoal(id); return userTask(id).status() == UserTask.Status.CANCELLED;
+            }
+        }
+    }
+    @SuppressWarnings("unchecked")
+    private synchronized void observeUserTask(ExecutionEvent event) {
+        if (!(event.metadata().get("goalId") instanceof UUID goalId)) return;
+        UserTask task = userTasks.get(goalId);
+        if (task == null || task.terminal() || !task.agentId().equals(event.agentId())) return;
+        switch (event.type()) {
+            case GOAL_STARTED -> userTasks.put(goalId, task.started(event.occurredAt()));
+            case GOAL_COMPLETED -> userTasks.put(goalId, task.finished(Boolean.TRUE.equals(event.metadata().get("failed")) ? UserTask.Status.FAILED : UserTask.Status.SUCCEEDED,
+                    event.occurredAt(), event.message(), (Map<String, Object>) event.metadata().get("outputs"), (app.llm.LLMStatus) event.metadata().get("providerStatus")));
+            case GOAL_CANCELLED -> userTasks.put(goalId, task.finished(UserTask.Status.CANCELLED, event.occurredAt(), event.message(), Map.of(), task.provider()));
+            default -> { }
+        }
+    }
+    public synchronized boolean requestResponseDelivered(UUID requestId) { return receivedResults.contains(requestId); }
     public ToolResult invoke(UUID id, ToolCall call, String plan, String step) {
         synchronized (executionLock) {
             AbstractAgent agent = requireAgent(id);
@@ -504,6 +548,43 @@ public final class AgentRuntime {
     public long messagesProcessed() { return messagesProcessed.get(); }
     public ExecutionTrace trace() { return trace; }
     public EnvironmentView environment() { return environment; }
+    public record EnvironmentInspection(WorldStateSnapshot snapshot, List<EnvironmentManagement.Fact> facts, boolean configurable, String restriction) {
+        public EnvironmentInspection { facts = List.copyOf(facts); }
+    }
+    private String environmentEditRestriction() {
+        if (running) return "Stop automatic cycles before editing facts";
+        if (hasActiveConversations() || hasActiveCollaborations() || agents().stream().anyMatch(a -> !a.pendingGoals().isEmpty() || a.status() == AgentStatus.RUNNING)
+                || requests.values().stream().anyMatch(r -> r.status() == AgentRequest.Status.PENDING))
+            return "Finish or cancel pending agent/session work before editing facts";
+        return "";
+    }
+    /** Host inspection is serialized with agent invocations; callers should use a background worker. */
+    public EnvironmentInspection inspectEnvironment() {
+        synchronized (executionLock) {
+            synchronized (this) {
+                var snapshot = environment.snapshot();
+                if (environment instanceof EnvironmentManagement management)
+                    return new EnvironmentInspection(snapshot, management.configurationFacts(), true, environmentEditRestriction());
+                var facts = snapshot.facts().entrySet().stream().sorted(Map.Entry.comparingByKey()).map(e -> new EnvironmentManagement.Fact(
+                        e.getKey(), EnvironmentManagement.FactType.of(e.getValue()), e.getValue(), false, false, "Adapter does not support host editing")).toList();
+                return new EnvironmentInspection(snapshot, facts, false, "This environment supports observations only");
+            }
+        }
+    }
+    /** Explicit host operation, never an agent set_fact capability. Requires idle work and the optional management interface. */
+    public void changeEnvironmentFact(EnvironmentManagement.Change change) {
+        synchronized (executionLock) {
+            synchronized (this) {
+                if (!(environment instanceof EnvironmentManagement management)) throw new IllegalStateException("Environment does not support host configuration");
+                String restriction = environmentEditRestriction(); if (!restriction.isEmpty()) throw new IllegalStateException(restriction);
+                var before = environment.snapshot(); management.applyHostChange(change); var after = environment.snapshot();
+                trace.publish(new ExecutionEvent(null, ExecutionEventType.HOST_ENVIRONMENT_CHANGE, null, "host-environment",
+                        change.operation() + " fact " + change.name(), Map.of("origin", "HOST", "operation", change.operation(), "fact", change.name(),
+                        "beforePresent", before.facts().containsKey(change.name()), "previousValue", before.facts().getOrDefault(change.name(), "<absent>"),
+                        "afterPresent", after.facts().containsKey(change.name()), "newValue", after.facts().getOrDefault(change.name(), "<absent>"))));
+            }
+        }
+    }
     public List<ToolSchema> environmentActions() { return environment.actions(); }
     public MessageBus messageBus() { return messageBus; }
     public boolean needsCleanup() { return cleanupRequested; }

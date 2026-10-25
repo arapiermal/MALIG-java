@@ -125,13 +125,39 @@ public final class RuntimeFacade implements AutoCloseable {
     public Optional<AgentConfig> findAgent(UUID id) { return drafts.stream().filter(a -> a.getId().equals(id)).findFirst(); }
     public Optional<AbstractAgent> findRuntimeAgent(UUID id) { return runtime.find(id); }
     public CompletableFuture<Void> submitTask(UUID id, String task) {
-        return runAsync(() -> { if (task == null || task.isBlank()) throw new IllegalArgumentException("Enter a task"); runtime.submitGoal(id, Goal.of(task)); drainWork(); });
+        return submitTrackedTask(id, task).thenApply(receipt -> null);
+    }
+    public record WorkSubmission(UUID id, String advancementNote) { }
+    /** Retains an accepted ID even when bounded advancement stops or throws after real work occurred. */
+    private String advanceAcceptedWork() {
+        try { drainWork(); return "Bounded advancement finished; inspect the recorded outcome. Paused/human work can remain pending."; }
+        catch (RuntimeException ex) {
+            report(ex); return "Work was accepted and remains recorded. Advancement stopped: " + ex.getMessage() + ". Use Step to continue; do not resubmit to retry advancement.";
+        }
+    }
+    public CompletableFuture<WorkSubmission> submitTrackedTask(UUID id, String task) {
+        return CompletableFuture.supplyAsync(() -> {
+            if (task == null || task.isBlank()) throw new IllegalArgumentException("Enter a task");
+            UUID goalId = runtime.submitUserTask(id, Goal.of(task));
+            return new WorkSubmission(goalId, advanceAcceptedWork());
+        }, worker);
     }
     public CompletableFuture<UUID> requestWork(UUID requester, UUID recipient, String task, String onResult) {
+        return requestTrackedWork(requester, recipient, task, onResult).thenApply(WorkSubmission::id);
+    }
+    public CompletableFuture<WorkSubmission> requestTrackedWork(UUID requester, UUID recipient, String task, String onResult) {
         return CompletableFuture.supplyAsync(() -> {
             if (task == null || task.isBlank()) throw new IllegalArgumentException("Enter recipient work");
-            UUID id = runtime.request(requester, recipient, Goal.of(task), onResult); drainWork(); return id;
+            UUID id = runtime.request(requester, recipient, Goal.of(task), onResult);
+            return new WorkSubmission(id, advanceAcceptedWork());
         }, worker);
+    }
+    public CompletableFuture<Boolean> cancelPendingTask(UUID id) { return CompletableFuture.supplyAsync(() -> runtime.cancelUserTask(id), worker); }
+    public CompletableFuture<AgentRuntime.EnvironmentInspection> inspectEnvironment() {
+        return CompletableFuture.supplyAsync(runtime::inspectEnvironment, worker);
+    }
+    public CompletableFuture<Void> changeEnvironmentFact(EnvironmentManagement.Change change) {
+        return runAsync(() -> runtime.changeEnvironmentFact(change));
     }
     public void sendMessage(UUID sender, UUID recipient, String content) {
         runAsync(() -> { runtime.send(AgentMessage.direct(sender, recipient, content)); drainWork(); });

@@ -57,7 +57,12 @@ public abstract class AbstractAgent {
         lastExecution = null;
         lastInvocationFailed = false;
         processedGoals = work.stream().map(Goal::id).collect(java.util.stream.Collectors.toUnmodifiableSet());
+        var providerBefore = llmStatus;
         try {
+            if (selected != null) {
+                lastOutcome = "";
+                context.trace().publish(new ExecutionEvent(null, ExecutionEventType.GOAL_STARTED, id, "agent", selected.description(), Map.of("goalId", selected.id())));
+            }
             perceive();
             if (!work.isEmpty()) decide(List.copyOf(work));
             lastInvocationFailed = lastExecution != null && lastExecution.status() == PlanExecution.Status.FAILED;
@@ -74,7 +79,12 @@ public abstract class AbstractAgent {
             lastOutcome = "Execution failed: " + ex.getMessage();
             memory().putState("lastOutcome", lastOutcome);
             emit(ExecutionEventType.ERROR, lastOutcome);
-        } finally { activeMessage = null; }
+        } finally {
+            activeMessage = null;
+            if (selected != null) context.trace().publish(new ExecutionEvent(null, ExecutionEventType.GOAL_COMPLETED, id, "agent", lastOutcome,
+                    Map.of("goalId", selected.id(), "failed", lastInvocationFailed, "outputs", resultData(),
+                            "providerStatus", llmStatus == providerBefore ? app.llm.LLMStatus.configured(null) : llmStatus)));
+        }
     }
     public synchronized void receive(AgentMessage message) {
         memory().remember(MemoryEntry.message(message, Instant.now()));
@@ -91,7 +101,10 @@ public abstract class AbstractAgent {
     }
     public synchronized void submitGoal(Goal goal) { pendingGoals.add(Objects.requireNonNull(goal)); }
     public synchronized void submitGoal(Goal goal, AgentMessage source) { goalMessages.put(goal.id(), source); submitGoal(goal); }
-    public synchronized void cancelGoal(UUID id) { pendingGoals.removeIf(goal -> goal.id().equals(id)); goalMessages.remove(id); }
+    public synchronized void cancelGoal(UUID id) {
+        boolean removed = pendingGoals.removeIf(goal -> goal.id().equals(id)); goalMessages.remove(id);
+        if (removed) context.trace().publish(new ExecutionEvent(null, ExecutionEventType.GOAL_CANCELLED, this.id, "agent", "Pending goal cancelled", Map.of("goalId", id)));
+    }
     protected boolean canProcessGoal(Goal goal) {
         AgentMessage message = goalMessages.get(goal.id());
         return message == null || message.type() != MessageType.CONVERSATION || context.conversationActive(UUID.fromString(message.metadata().get("conversationId")));
