@@ -31,7 +31,8 @@ public record ToolSchema(String name, String description, Map<String, Object> pa
             String type = String.valueOf(((Map<?, ?>) properties.get(entry.getKey())).get("type"));
             Object value = entry.getValue();
             boolean valid = switch (type) {
-                case "string" -> value instanceof String text && !text.isBlank();
+                case "string" -> value instanceof String text && (!text.isBlank()
+                        || Integer.valueOf(0).equals(((Map<?, ?>) properties.get(entry.getKey())).get("minLength")));
                 case "number" -> value instanceof Number n && Double.isFinite(n.doubleValue());
                 case "integer" -> value instanceof Number n && Double.isFinite(n.doubleValue()) && n.doubleValue() == Math.rint(n.doubleValue());
                 case "boolean" -> value instanceof Boolean;
