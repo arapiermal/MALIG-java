@@ -6,8 +6,11 @@ import java.time.Instant;
 import java.util.*;
 
 /** The existing shared-facts demo isolated behind the HMAS environment boundary. */
-public final class ResourceEnvironment implements EnvironmentContext {
+public final class ResourceEnvironment implements EnvironmentContext, EnvironmentManagement {
     private final Map<String, Object> facts = new LinkedHashMap<>();
+    private final Map<String, FactType> userFacts = new LinkedHashMap<>();
+    private static final Set<String> RESERVED = Set.of("simulationTick", "resourceLevel", "alert", "desiredResourceTarget",
+            "transportRemaining", "regionalRevision", "foodShortage", "energyShortage", "food", "energy", "foodNeed", "energyNeed");
     private final Map<String, Region> regions = new LinkedHashMap<>();
     private int transportRemaining;
     private long revision;
@@ -43,6 +46,46 @@ public final class ResourceEnvironment implements EnvironmentContext {
         }
         var entities = regions.entrySet().stream().map(e -> new WorldEntity(UUID.nameUUIDFromBytes(e.getKey().getBytes(java.nio.charset.StandardCharsets.UTF_8)), "region", e.getKey(), e.getValue().attributes())).toList();
         return new WorldStateSnapshot(Instant.now(), entities, observed);
+    }
+    @Override public synchronized List<Fact> configurationFacts() {
+        return snapshot().facts().entrySet().stream().sorted(Map.Entry.comparingByKey()).map(entry -> {
+            String name = entry.getKey(); boolean custom = userFacts.containsKey(name);
+            FactType type = custom ? userFacts.get(name) : name.equals("resourceLevel") ? FactType.INTEGER : FactType.of(entry.getValue());
+            boolean editable = custom || name.equals("resourceLevel") || name.equals("alert");
+            String description = custom ? "User-defined shared observation. Type is fixed; delete/recreate to change it."
+                    : name.equals("resourceLevel") ? "Scalar resource level: integer 0-100. Does not edit regional reserves."
+                    : name.equals("alert") ? "Synthetic boolean alert." : "Read-only system/scenario observation.";
+            return new Fact(name, type, entry.getValue(), editable, custom, description);
+        }).toList();
+    }
+    @Override public synchronized void applyHostChange(Change change) {
+        String name = change.name();
+        if (!name.matches("[A-Za-z][A-Za-z0-9_]{0,63}")) throw new IllegalArgumentException("Fact names must start with a letter, then letters/digits/underscores (maximum 64 characters)");
+        if (change.operation() == Operation.CREATE) {
+            if (RESERVED.stream().anyMatch(k -> k.equalsIgnoreCase(name)) || snapshot().facts().keySet().stream().anyMatch(k -> k.equalsIgnoreCase(name)))
+                throw new IllegalArgumentException("Fact name is reserved or already exists");
+            if (userFacts.size() >= 128) throw new IllegalArgumentException("Maximum 128 user-defined facts");
+            if (change.type() == null) throw new IllegalArgumentException("Select a fact type");
+            Object value = change.type().normalize(change.value());
+            facts.put(name, value); userFacts.put(name, change.type()); return;
+        }
+        boolean custom = userFacts.containsKey(name);
+        if (!custom && !Set.of("resourceLevel", "alert").contains(name)) throw new IllegalArgumentException("Unknown or read-only system/scenario fact");
+        if (change.expectedValue() != null && !Objects.equals(facts.get(name), change.expectedValue()))
+            throw new IllegalArgumentException("Fact changed since inspection; reload the editor before saving");
+        if (change.operation() == Operation.DELETE) {
+            if (!custom) throw new IllegalArgumentException("Only user-defined facts may be deleted");
+            userFacts.remove(name); facts.remove(name); return;
+        }
+        FactType type = custom ? userFacts.get(name) : name.equals("resourceLevel") ? FactType.INTEGER : FactType.BOOLEAN;
+        if (type != change.type()) throw new IllegalArgumentException("Fact type cannot change during an update");
+        Object value = type.normalize(change.value());
+        if (name.equals("resourceLevel")) {
+            long level = (Long) value;
+            if (level < 0 || level > 100) throw new IllegalArgumentException("resourceLevel must be an integer in 0-100");
+            value = (int) level;
+        }
+        facts.put(name, value);
     }
     /** Explicit host initialization. Resets the small demonstration, never exposed as an agent tool. */
     public synchronized void configureRegions(int foodShortage, int energyShortage, int capacity) {
