@@ -1,6 +1,6 @@
-# HMAS — Hybrid Multi-Agent System
-
-**HMAS (Hybrid Multi-Agent System)** is an experimental, modular multi-agent framework developed in **Java and JavaFX** as part of a Master's thesis in Computer Engineering.
+# HMAS - Hybrid Multi-Agent System
+# MALIG - Multi-Agent Language Intelligence Grid
+The **HMAS**, special name **MALIG**, is an experimental, modular multi-agent framework developed in **Java and JavaFX** as part of my Master's thesis in Computer Engineering.
 
 The project explores how traditional software agents, algorithmic components, and Large Language Model (LLM) agents can operate within a shared architecture, combining deterministic execution with AI-assisted reasoning, planning, and decision-making.
 
@@ -112,7 +112,7 @@ These demonstrations illustrate individual framework capabilities and experiment
 
 ## Technologies
 
-- **Java 21** — Core application and agent architecture
+- **Java 25** — Core application and agent architecture
 - **JavaFX** — Desktop graphical interface
 - **Maven** — Dependency management and build system
 - **LLM APIs** — External model integration
@@ -120,7 +120,7 @@ These demonstrations illustrate individual framework capabilities and experiment
 ## Installation and Running
 
 **Requirements:**
-- JDK 21+
+- JDK 25+
 - Apache Maven
 - Internet connection and appropriate API credentials for online LLM functionality (configure .env file in repository root)
 
