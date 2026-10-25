@@ -1,4 +1,5 @@
 target/
+hmas-workspace/
 .m2/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/

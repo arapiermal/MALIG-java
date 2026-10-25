@@ -13,13 +13,18 @@ import java.util.*;
 public final class AgentFactory {
     private final AgentRuntime runtime;
     private final java.util.function.Function<LLMConfig, LLMService> services;
+    private final WorkspaceFiles workspaceFiles;
     private final PolicyRegistry policies = new PolicyRegistry();
     public PolicyRegistry policies() { return policies; }
     public AgentRuntime runtime() { return runtime; }
     private final Map<String, Planner> scenarioPlanners = new LinkedHashMap<>();
     private final Map<String, Capability> scenarioTools = new LinkedHashMap<>();
     public AgentFactory(AgentRuntime runtime, java.util.function.Function<LLMConfig, LLMService> services) {
+        this(runtime, services, WorkspaceFiles.defaultRoot());
+    }
+    public AgentFactory(AgentRuntime runtime, java.util.function.Function<LLMConfig, LLMService> services, java.nio.file.Path workspaceRoot) {
         this.runtime = Objects.requireNonNull(runtime); this.services = Objects.requireNonNull(services);
+        this.workspaceFiles = new WorkspaceFiles(workspaceRoot);
     }
     public AgentFactory planner(String name, Planner planner) { scenarioPlanners.put(name, planner); return this; }
     public AgentFactory tool(Capability capability) { scenarioTools.put(capability.name(), capability); return this; }
@@ -29,6 +34,7 @@ public final class AgentFactory {
     }
     public Set<String> toolNames() {
         Set<String> names = new LinkedHashSet<>(List.of("inspect_environment", "remember", "retrieve_memory", "send_message", "delegate_task", "request_agent", "get_request_result", "list_agents"));
+        names.addAll(WorkspaceFiles.NAMES);
         names.addAll(scenarioTools.keySet());
         runtime.environmentActions().forEach(s -> names.add(s.name()));
         return Collections.unmodifiableSet(names);
@@ -57,6 +63,7 @@ public final class AgentFactory {
         if (service != null) planners.register("llm", new LLMPlanner(service));
         List<Capability> available = new ArrayList<>(List.of(new InspectEnvironmentCapability(runtime.environment()),
                 new RememberCapability(memory), new SendMessageCapability(runtime::send)));
+        available.addAll(workspaceFiles.capabilities());
         available.add(new ToolCapability(ToolSchema.of("retrieve_memory", "Retrieve relevant past entries.",
                 Map.of("query", "string", "limit", "integer")), (actor, call) -> {
             double requestedLimit = ((Number) call.arguments().get("limit")).doubleValue();

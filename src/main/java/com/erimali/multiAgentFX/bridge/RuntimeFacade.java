@@ -95,7 +95,7 @@ public final class RuntimeFacade implements AutoCloseable {
             }));
         });
     }
-    public AgentConfig newDraft() { AgentConfig c = new AgentConfig(); c.setTools(factory.toolNames()); return c; }
+    public AgentConfig newDraft() { AgentConfig c = new AgentConfig(); c.setTools(Set.of()); return c; }
     public AgentFactory factory() { return factory; }
     public CompletableFuture<Void> runAsync(Runnable task) {
         return CompletableFuture.runAsync(task, worker).whenComplete((ignored, error) -> { if (error != null) report(error); });
