@@ -21,6 +21,7 @@ public final class AgentWorkPane extends VBox {
     private final TextArea task = input("task-content"), peerTask = input("request-content"), details = readOnly("task-result"), directory = readOnly("task-directory");
     private final TextField continuation = new TextField();
     private final Button submit = new Button("Submit Task"), request = new Button("Request Agent Work"), cancel = new Button("Cancel pending task");
+    private final Button cancelWait = new Button("Cancel selected request's wait set");
     private final Label taskStatus = label(""), requestStatus = label("");
     private final TabPane modes = new TabPane();
     private final AtomicBoolean queued = new AtomicBoolean();
@@ -42,6 +43,8 @@ public final class AgentWorkPane extends VBox {
         peerTask.setPromptText("Enter the actual work and context to send to the recipient.");
         continuation.setId("task-continuation"); continuation.setPromptText("Optional continuation goal for the requester after the correlated response");
         submit.setId("task-submit"); request.setId("task-request"); cancel.setId("task-cancel");
+        cancelWait.setId("request-cancel-wait");
+        cancelWait.setOnAction(e -> selectedWait().ifPresent(w -> facade.cancelRequestWait(w.id())));
         taskStatus.setId("task-status"); requestStatus.setId("request-status");
         tasks.setId("task-history"); requests.setId("request-history"); modes.setId("task-modes");
         submit.setOnAction(e -> submit()); request.setOnAction(e -> request());
@@ -59,13 +62,14 @@ public final class AgentWorkPane extends VBox {
             @Override protected void updateItem(AgentRequest r, boolean empty) { super.updateItem(r, empty); setText(empty || r == null ? null : name(r.requesterId()) + " -> " + name(r.recipientId()) + " | " + r.outcomeLabel() + "\n" + shortText(r.goal().description())); }
         });
         tasks.getSelectionModel().selectedItemProperty().addListener((o,a,b) -> { updateButtons(); showDetails(); });
-        requests.getSelectionModel().selectedItemProperty().addListener((o,a,b) -> showDetails());
+        requests.getSelectionModel().selectedItemProperty().addListener((o,a,b) -> { updateButtons(); showDetails(); });
         VBox single = new VBox(8, label("Agent"), sender, task, new FlowPane(8,6,submit,cancel), taskStatus,
-                label("One submitted invocation is recorded per goal ID. Human/paused work can remain pending.\nWith granted list_agents/request_agent tools, a coordinator can discover and contact multiple registered peers. Peer work can outlive this invocation; no automatic result aggregation is implied."),
+                label("One submitted invocation is recorded per goal ID. Human/paused work can remain pending.\nExplicitly grant list_agents + request_agent for dynamic peer discovery/work. For ONE continuation after multiple results, also grant await_agent_requests: omit individual onResult, await the returned request IDs, then evaluate every result. No grants are enabled automatically."),
                 label("Submitted task history"), tasks);
         VBox peer = new VBox(8, label("Requester"), requester, label("Recipient"), recipient, peerTask,
                 label("onResult is an optional new goal for the requester after the response, not a callback script. Leave blank to receive/inspect the result without invoking the requester again."),
-                continuation, request, requestStatus, label("Runtime peer-request history (separate from parent-child delegation)"), requests);
+                continuation, request, requestStatus, label("Runtime peer-request history (separate from parent-child delegation)"), requests, cancelWait,
+                label("Cancelling a wait suppresses its continuation; peer work and effects already admitted remain. Stop ends automatic cycles, not generic peer work or an in-flight API request. Step can invoke several agents."));
         VBox.setVgrow(tasks, Priority.ALWAYS); VBox.setVgrow(requests, Priority.ALWAYS);
         modes.getTabs().setAll(new Tab("Single-Agent Task", single), new Tab("Peer Request", peer));
         modes.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
@@ -79,7 +83,7 @@ public final class AgentWorkPane extends VBox {
             if (!Set.of(ExecutionEventType.AGENT_CREATED, ExecutionEventType.AGENT_UPDATED, ExecutionEventType.AGENT_REMOVED,
                     ExecutionEventType.AGENT_STATE_CHANGED, ExecutionEventType.GOAL_SUBMITTED, ExecutionEventType.GOAL_STARTED,
                     ExecutionEventType.GOAL_COMPLETED, ExecutionEventType.GOAL_CANCELLED, ExecutionEventType.REQUEST_SENT,
-                    ExecutionEventType.REQUEST_COMPLETED, ExecutionEventType.REQUEST_RESULT_RECEIVED).contains(e.type())) return;
+                    ExecutionEventType.REQUEST_COMPLETED, ExecutionEventType.REQUEST_RESULT_RECEIVED, ExecutionEventType.REQUEST_WAIT_CHANGED).contains(e.type())) return;
             if (queued.compareAndSet(false, true)) Platform.runLater(() -> { queued.set(false); refresh(); });
         });
         refresh();
@@ -116,6 +120,12 @@ public final class AgentWorkPane extends VBox {
         request.setDisable(requesting || requester.getValue() == null || recipient.getValue() == null || peerTask.getText().isBlank()
                 || requester.getValue().id().equals(recipient.getValue().id()));
         var t = tasks.getSelectionModel().getSelectedItem(); cancel.setDisable(t == null || t.status() != UserTask.Status.PENDING);
+        cancelWait.setDisable(selectedWait().isEmpty());
+    }
+    private Optional<RequestWait> selectedWait() {
+        var r = requests.getSelectionModel().getSelectedItem();
+        return r == null ? Optional.empty() : facade.runtime().requestWaits().stream().filter(w -> w.requestIds().contains(r.id())
+                && (w.status() == RequestWait.Status.WAITING || w.status() == RequestWait.Status.QUEUED)).findFirst();
     }
     private void selectTask(UUID id) { tasks.getItems().stream().filter(t -> t.id().equals(id)).findFirst().ifPresent(tasks.getSelectionModel()::select); showDetails(); }
     private void selectRequest(UUID id) { requests.getItems().stream().filter(r -> r.id().equals(id)).findFirst().ifPresent(requests.getSelectionModel()::select); showDetails(); }
@@ -161,6 +171,13 @@ public final class AgentWorkPane extends VBox {
                     + "\n\nRECIPIENT WORK\n" + r.goal().description() + "\n\nCORRELATED RESPONSE / ERROR\n" + r.result()
                     + "\n\nOUTPUT DATA\n" + r.outputs() + "\n\nOBSERVATIONS AT REQUEST\n" + r.observedFacts() + "\n\nonResult continuation goal:\n" + (r.onResult().isBlank()?"None - result reception does not invoke the requester":r.onResult());
         }
+        UUID owner = single() ? Optional.ofNullable(tasks.getSelectionModel().getSelectedItem()).map(UserTask::agentId).orElse(null)
+                : Optional.ofNullable(requests.getSelectionModel().getSelectedItem()).map(AgentRequest::requesterId).orElse(null);
+        var waits = facade.runtime().requestWaits().stream().filter(w -> w.ownerId().equals(owner)).toList();
+        if (!waits.isEmpty()) value += "\n\nREQUEST WAIT SETS (COMPLETED means continuation invocation completed, not verified achievement)\n"
+                + waits.stream().map(w -> "Wait " + w.id() + " | " + w.status() + "\nRequests: " + w.requestIds()
+                        + "\nContinuation goal " + w.continuation().id() + ": " + w.continuation().description()
+                        + "\nContinuation result / error: " + (w.result().isBlank() ? "No completed continuation result" : w.result())).collect(java.util.stream.Collectors.joining("\n\n"));
         if (!details.getText().equals(value)) details.setText(value);
     }
     private void showDirectory() {

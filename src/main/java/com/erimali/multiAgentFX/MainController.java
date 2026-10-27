@@ -82,8 +82,12 @@ public class MainController {
     }
 
     private void stepRuntime() {
-        runtimeFacade.step();
-        log("[Runtime] " + runtimeFacade.runtimeSummary());
+        log("[Runtime] Cycle queued. A cycle may invoke several agents; provider work runs on the runtime worker.");
+        runtimeFacade.stepAsync().whenComplete((ignored, error) -> {
+            String message = error == null ? "[Runtime] Cycle finished. " + runtimeFacade.runtimeSummary()
+                    : "[Runtime] Cycle failed. Inspect the runtime error events; work was not replayed.";
+            Platform.runLater(() -> log(message));
+        });
     }
 
     private void openRuntimeMonitor() {
