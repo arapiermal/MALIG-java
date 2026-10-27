@@ -2,7 +2,7 @@ package app.core.capability;
 
 import java.util.*;
 
-/** A deliberately small JSON-schema subset: flat, typed, required arguments; no extra keys. */
+/** A deliberately small JSON-schema subset: typed primitive arguments and bounded string arrays; no extra keys. */
 public record ToolSchema(String name, String description, Map<String, Object> parametersSchema) {
     public ToolSchema {
         Objects.requireNonNull(name);
@@ -36,10 +36,19 @@ public record ToolSchema(String name, String description, Map<String, Object> pa
                 case "number" -> value instanceof Number n && Double.isFinite(n.doubleValue());
                 case "integer" -> value instanceof Number n && Double.isFinite(n.doubleValue()) && n.doubleValue() == Math.rint(n.doubleValue());
                 case "boolean" -> value instanceof Boolean;
+                case "array" -> validStringArray(value, (Map<?, ?>) properties.get(entry.getKey()));
                 default -> false;
             };
             if (!valid) return Optional.of("Argument " + entry.getKey() + " must be " + type);
         }
         return Optional.empty();
+    }
+    private static boolean validStringArray(Object value, Map<?, ?> schema) {
+        if (!(value instanceof List<?> items) || !(schema.get("items") instanceof Map<?, ?> itemSchema)
+                || !"string".equals(itemSchema.get("type"))) return false;
+        int min = schema.get("minItems") instanceof Number n ? n.intValue() : 0;
+        int max = schema.get("maxItems") instanceof Number n ? n.intValue() : 16;
+        return items.size() >= min && items.size() <= max && items.stream().allMatch(i -> i instanceof String s && !s.isBlank())
+                && (!Boolean.TRUE.equals(schema.get("uniqueItems")) || new HashSet<>(items).size() == items.size());
     }
 }

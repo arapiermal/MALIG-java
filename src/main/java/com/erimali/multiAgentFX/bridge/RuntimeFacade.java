@@ -45,6 +45,7 @@ public final class RuntimeFacade implements AutoCloseable {
         return CompletableFuture.supplyAsync(() -> runtime.startCollaboration(initiator, reviewer, task), worker);
     }
     public void cancelCollaboration(UUID id) { runtime.cancelCollaboration(id); runAsync(runtime::cleanupSessions); }
+    public void cancelRequestWait(UUID id) { runtime.cancelRequestWait(id); runAsync(runtime::cleanupSessions); }
     /** Advance asynchronous request/result continuations, with a finite host budget. Human/paused work stays pending. */
     public void drainWork() {
         for (int i = 0; i < 20 && runtime.hasReadyWork(); i++) runtime.step();
@@ -162,7 +163,8 @@ public final class RuntimeFacade implements AutoCloseable {
     public void sendMessage(UUID sender, UUID recipient, String content) {
         runAsync(() -> { runtime.send(AgentMessage.direct(sender, recipient, content)); drainWork(); });
     }
-    public void step() { runAsync(runtime::step); }
+    public void step() { stepAsync(); }
+    public CompletableFuture<Void> stepAsync() { return runAsync(runtime::step); }
     public void setAgentStatus(UUID id, AgentStatus status) { runAsync(() -> runtime.setAgentStatus(id, status)); }
     public AutoCloseable onEvent(Consumer<ExecutionEvent> listener) { return runtime.trace().subscribe(listener); }
     public List<ExecutionEvent> recentEvents(int limit) { return runtime.trace().recent(limit); }

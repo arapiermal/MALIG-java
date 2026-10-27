@@ -33,7 +33,7 @@ public final class AgentFactory {
         names.addAll(scenarioPlanners.keySet()); names.add("llm"); return List.copyOf(names);
     }
     public Set<String> toolNames() {
-        Set<String> names = new LinkedHashSet<>(List.of("inspect_environment", "remember", "retrieve_memory", "send_message", "delegate_task", "request_agent", "get_request_result", "list_agents"));
+        Set<String> names = new LinkedHashSet<>(List.of("inspect_environment", "remember", "retrieve_memory", "send_message", "delegate_task", "request_agent", "get_request_result", "list_agents", "await_agent_requests"));
         names.addAll(WorkspaceFiles.NAMES);
         names.addAll(scenarioTools.keySet());
         runtime.environmentActions().forEach(s -> names.add(s.name()));
@@ -94,6 +94,18 @@ public final class AgentFactory {
                     var request = runtime.requestResult(actor, UUID.fromString((String) call.arguments().get("requestId")));
                     return ToolResult.success(request.outcomeLabel() + " (invocation status " + request.status() + "): " + request.result(), Map.of("request", request));
                 }));
+        available.add(new ToolCapability(new ToolSchema("await_agent_requests",
+                "Wait for ALL named own peer requests to deliver terminal results, then invoke this agent once with every distinct result (including failures). No polling. Create requests WITHOUT onResult. Returns a wait ID, not completed work. A request can belong to only one wait set. Finish this invocation with a waiting acknowledgement, not a final answer.",
+                Map.of("type", "object", "properties", Map.of(
+                        "requestIds", Map.of("type", "array", "items", Map.of("type", "string"), "minItems", 1, "maxItems", 16, "uniqueItems", true),
+                        "onComplete", Map.of("type", "string")),
+                        "required", List.of("requestIds", "onComplete"), "additionalProperties", false)), (actor, call) -> {
+            try {
+                var ids = ((List<?>) call.arguments().get("requestIds")).stream().map(value -> UUID.fromString((String) value)).toList();
+                UUID wait = runtime.awaitRequests(actor, ids, (String) call.arguments().get("onComplete"));
+                return ToolResult.success("Waiting for terminal peer results; no aggregation has run yet", Map.of("waitId", wait, "status", "WAITING", "requestIds", ids));
+            } catch (IllegalArgumentException ex) { return ToolResult.failure(ex.getMessage()); }
+        }));
         runtime.environmentActions().forEach(s -> available.add(runtime.environmentCapability(s)));
         available.add(new ToolCapability(ToolSchema.of("list_agents", "Discover registered peers, controller/policy configuration, task descriptions, tool grants and schemas. A capability is not itself an agent.", Map.of()),
                 (actor, call) -> ToolResult.success("Registered agent directory", Map.of("agents", runtime.directory()))));

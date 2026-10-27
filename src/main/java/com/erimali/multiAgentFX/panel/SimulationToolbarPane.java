@@ -16,6 +16,8 @@ public class SimulationToolbarPane extends ToolBar {
     private final Button demoButton = new Button("Load Demo");
 
     public SimulationToolbarPane() {
+        stepButton.setTooltip(new javafx.scene.control.Tooltip("One sequential runtime cycle may invoke several agents, not one LLM call."));
+        stopButton.setTooltip(new javafx.scene.control.Tooltip("Stop automatic cycles and active conversation/review sessions. Generic queued peer work remains. An admitted API call or effect may finish."));
         getItems().addAll(startButton, stopButton, stepButton, demoButton, new Separator(), runtimeButton, llmTestButton, apiButton);
     }
 

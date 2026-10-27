@@ -14,6 +14,7 @@ public final class AgentRuntime {
     private final Map<UUID, UUID> parents = new LinkedHashMap<>();
     private final Map<UUID, Delegation> delegations = new LinkedHashMap<>();
     private final Map<UUID, AgentRequest> requests = new LinkedHashMap<>();
+    private final Map<UUID, RequestWait> requestWaits = new LinkedHashMap<>();
     private final Map<UUID, UserTask> userTasks = new LinkedHashMap<>();
     private final Map<UUID, ConversationSession> conversations = new LinkedHashMap<>();
     private final Map<UUID, CollaborationTask> collaborations = new LinkedHashMap<>();
@@ -44,6 +45,7 @@ public final class AgentRuntime {
         this.messageBus = Objects.requireNonNull(messageBus);
         this.trace = Objects.requireNonNull(trace);
         trace.subscribe(this::observeUserTask);
+        trace.subscribe(this::observeRequestWait);
         trace.subscribe(event -> {
             if (event.agentId() != null && Set.of(ExecutionEventType.ACTION_COMPLETED, ExecutionEventType.TASK_DELEGATED,
                     ExecutionEventType.TASK_COMPLETED, ExecutionEventType.REQUEST_SENT, ExecutionEventType.REQUEST_COMPLETED,
@@ -92,6 +94,9 @@ public final class AgentRuntime {
                 parents.entrySet().removeIf(e -> e.getValue().equals(id));
                 messageBus.remove(id);
                 cancelRequests(id);
+                List.copyOf(requestWaits.values()).stream().filter(w -> w.ownerId().equals(id)
+                        && (w.status() == RequestWait.Status.WAITING || w.status() == RequestWait.Status.QUEUED))
+                        .forEach(w -> changeRequestWait(w, RequestWait.Status.CANCELLED));
                 conversations.values().stream().filter(c -> c.participants.contains(id)).forEach(c ->
                         endConversation(c, ConversationSession.Status.CANCELLED, "Participant removed"));
                 delegations.replaceAll((key, task) -> task.status() == Delegation.Status.PENDING
@@ -183,6 +188,7 @@ public final class AgentRuntime {
                     }
                 }
             }
+            maintainRequestWaits();
             scheduler.run(agents().stream().filter(AbstractAgent::hasPendingWork).toList(), List.of());
             finishDelegations();
             finishRequests();
@@ -272,6 +278,8 @@ public final class AgentRuntime {
     /** Admission check between provider/tool rounds. Already admitted effects are never rolled back. */
     public synchronized boolean invocationActive(UUID id) {
         var goals = requireAgent(id).processedGoals();
+        if (requestWaits.values().stream().anyMatch(w -> w.ownerId().equals(id)
+                && w.status() == RequestWait.Status.CANCELLED && goals.contains(w.continuation().id()))) return false;
         for (ConversationSession session : conversations.values())
             if (session.pending != null && goals.contains(session.pending.id()) && session.status != ConversationSession.Status.RUNNING) return false;
         for (CollaborationTask work : collaborations.values()) {
@@ -371,6 +379,76 @@ public final class AgentRuntime {
         if (!request.requesterId().equals(actor) && !request.recipientId().equals(actor))
             throw new IllegalArgumentException("Only request participants may inspect its result");
         return request;
+    }
+    /** Each request belongs to the caller, has no per-response continuation, and is awaited at most once. */
+    public synchronized UUID awaitRequests(UUID owner, List<UUID> ids, String continuation) {
+        requireAgent(owner);
+        if (ids == null || ids.isEmpty() || ids.size() > 16 || new HashSet<>(ids).size() != ids.size())
+            throw new IllegalArgumentException("Select 1..16 distinct request IDs");
+        if (continuation == null || continuation.isBlank() || continuation.length() > 12000)
+            throw new IllegalArgumentException("Enter a continuation goal of 1..12000 characters");
+        for (UUID id : ids) {
+            var request = requests.get(id);
+            if (request == null || !request.requesterId().equals(owner)) throw new IllegalArgumentException("Only the requester may await its own requests");
+            if (!request.onResult().isBlank()) throw new IllegalArgumentException("Use either per-request onResult or await_agent_requests; grouped requests must omit onResult");
+            if (requestWaits.values().stream().anyMatch(w -> w.requestIds().contains(id)))
+                throw new IllegalArgumentException("Request already belongs to a wait set; it will not be replayed");
+        }
+        var wait = new RequestWait(UUID.randomUUID(), owner, ids, Goal.of(continuation), RequestWait.Status.WAITING);
+        requestWaits.put(wait.id(), wait); requestWaitEvent(wait); return wait.id();
+    }
+    public synchronized List<RequestWait> requestWaits() { return List.copyOf(requestWaits.values()); }
+    /** Cancellation does not cancel peer work or roll back admitted effects. */
+    public synchronized void cancelRequestWait(UUID id) {
+        var wait = Optional.ofNullable(requestWaits.get(id)).orElseThrow(() -> new IllegalArgumentException("Unknown request wait"));
+        if (wait.status() == RequestWait.Status.WAITING || wait.status() == RequestWait.Status.QUEUED) {
+            changeRequestWait(wait, RequestWait.Status.CANCELLED); cleanupRequested = true;
+        }
+    }
+    private void requestWaitEvent(RequestWait wait) {
+        trace.publish(new ExecutionEvent(null, ExecutionEventType.REQUEST_WAIT_CHANGED, wait.ownerId(), "requests",
+                "Request set " + wait.status(), Map.of("waitId", wait.id(), "requestIds", wait.requestIds(),
+                "goalId", wait.continuation().id(), "status", wait.status())));
+    }
+    private void changeRequestWait(RequestWait wait, RequestWait.Status status) {
+        var updated = wait.withStatus(status); requestWaits.put(wait.id(), updated); requestWaitEvent(updated);
+    }
+    private synchronized void observeRequestWait(ExecutionEvent event) {
+        if (event.type() != ExecutionEventType.GOAL_COMPLETED && event.type() != ExecutionEventType.GOAL_CANCELLED) return;
+        for (var wait : List.copyOf(requestWaits.values())) if (wait.status() == RequestWait.Status.QUEUED
+                && wait.ownerId().equals(event.agentId()) && wait.continuation().id().equals(event.metadata().get("goalId")))
+        {
+            var completed = wait.finish(event.type() == ExecutionEventType.GOAL_CANCELLED ? RequestWait.Status.CANCELLED
+                    : Boolean.TRUE.equals(event.metadata().get("failed")) ? RequestWait.Status.FAILED : RequestWait.Status.COMPLETED, event.message());
+            requestWaits.put(wait.id(), completed); requestWaitEvent(completed);
+        }
+    }
+    /** Called at execution boundaries only. Terminal failures count as delivered results, never as successes. */
+    private synchronized void maintainRequestWaits() {
+        for (var wait : List.copyOf(requestWaits.values())) {
+            var owner = agents.get(wait.ownerId());
+            if (wait.status() == RequestWait.Status.CANCELLED) {
+                if (owner != null) owner.cancelGoal(wait.continuation().id());
+            } else if (wait.status() == RequestWait.Status.WAITING && wait.requestIds().stream().allMatch(id ->
+                    requests.get(id).status() != AgentRequest.Status.PENDING && receivedResults.contains(id))) {
+                if (owner == null) { changeRequestWait(wait, RequestWait.Status.CANCELLED); continue; }
+                var actualResponse = requestResponses.get(wait.requestIds().getLast());
+                Map<String, String> metadata = new LinkedHashMap<>(actualResponse.metadata());
+                metadata.put("requestWaitId", wait.id().toString());
+                metadata.put("awaitedRequestIds", String.join(",", wait.requestIds().stream().map(UUID::toString).toList()));
+                // Activation context references an already authenticated/delivered runtime response.
+                var source = new AgentMessage(actualResponse.id(), actualResponse.senderId(), actualResponse.recipientId(),
+                        actualResponse.topic(), actualResponse.type(), actualResponse.priority(), actualResponse.content(), actualResponse.createdAt(), metadata);
+                changeRequestWait(wait, RequestWait.Status.QUEUED);
+                owner.submitGoal(wait.continuation(), source);
+                trace.publish(new ExecutionEvent(null, ExecutionEventType.GOAL_SUBMITTED, owner.id(), "requests",
+                        wait.continuation().description(), Map.of("goalId", wait.continuation().id(), "waitId", wait.id())));
+            }
+        }
+    }
+    private synchronized boolean hasReadyRequestWait() {
+        return requestWaits.values().stream().anyMatch(w -> w.status() == RequestWait.Status.WAITING
+                && w.requestIds().stream().allMatch(id -> requests.get(id).status() != AgentRequest.Status.PENDING && receivedResults.contains(id)));
     }
     private synchronized void finishRequests() {
         for (AgentRequest request : List.copyOf(requests.values())) {
@@ -591,10 +669,10 @@ public final class AgentRuntime {
     /** Clean cancelled session goals at a safe boundary without executing unrelated queued work. */
     public void cleanupSessions() {
         synchronized (executionLock) {
-            synchronized (this) { maintainConversations(); maintainCollaborations(); cleanupRequested = false; }
+            synchronized (this) { maintainConversations(); maintainCollaborations(); maintainRequestWaits(); cleanupRequested = false; }
         }
     }
-    public boolean hasReadyWork() { return cleanupRequested || messageBus.hasPendingMessages() || agents().stream().anyMatch(AbstractAgent::hasPendingWork); }
+    public boolean hasReadyWork() { return cleanupRequested || messageBus.hasPendingMessages() || hasReadyRequestWait() || agents().stream().anyMatch(AbstractAgent::hasPendingWork); }
 
     /** Explicit host-selected review workflow; reasoning and tools still run only inside agent ticks. */
     public synchronized UUID startCollaboration(UUID initiator, UUID reviewer, String task) {
